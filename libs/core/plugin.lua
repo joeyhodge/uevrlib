@@ -5,7 +5,7 @@
     does not require the rest of uevrUtils in order to be used in your project. 
     The executeFunction function takes any valid uevr/unreal objects and structures with or without uevrUtils.
     In addition to the getFunction call you can also get any property of an object using
-    the getProperty function. 
+    the getProperty function, or set a property with setProperty. 
 
     executeFunction can be called Asynchronously or Synchronously
 
@@ -63,6 +63,28 @@
             local gameKey = mappingData["Key"]["KeyName"]
             print("Mapping found for key:", mappingData["ActionName"], gameKey)
         end
+
+        -- ############# SetProperty example ##############
+        --   Set a field, map entry, or array element. Same indexed syntax as getProperty.
+        --   Returns nothing; failures are printed to the log.
+        -- ##############################################
+
+        -- SDK Definition for TMap example:
+        --class UIndianaUIControllerIconsData final : public UDataAsset
+        --{
+        --public:
+        --    TMap<class FName, class UTexture2D*>          Icons;                                             // 0x00D8(0x0050)(Protected, NativeAccessSpecifierProtected)
+        --}
+        -- Lua implementation
+	    local XBOX_ICONS_DATA = "IndianaUIControllerIconsData /Game/UI/XboxOneControllerIcons.XboxOneControllerIcons"
+	    local iconsData = uevrUtils.find_required_object(XBOX_ICONS_DATA)
+        local XBOX_RB_TEXTURE = "Texture2D /Game/UI/Art/FrontEnd/General/Navigation/Xbox/T_Button_Xbox_RB.T_Button_Xbox_RB"
+	    local rbTexture = uevrUtils.find_required_object(XBOX_RB_TEXTURE)
+        plugin.setProperty(iconsData, "Icons[Gamepad_FaceButton_Left]", rbTexture)
+        
+        plugin.setProperty(someActor, "ChildArray[2]", newElement)
+        
+        plugin.setProperty(someObject, "Opacity", 1.5)
 
 
 ]]--
@@ -164,6 +186,23 @@ local function convertResultDataType(dataType, dataValue)
             return dataValue
         end
 
+    -- MapProperty arrives as an array of {key, value} property blocks; build a Lua map
+    elseif dataType == "MapProperty" then
+        if type(dataValue) == "table" then
+            local map = {}
+            for _, entry in ipairs(dataValue) do
+                if type(entry) == "table" and entry.key ~= nil and entry.value ~= nil then
+                    local mapKey = M.convertResultData(entry.key)
+                    if mapKey ~= nil then
+                        map[mapKey] = M.convertResultData(entry.value)
+                    end
+                end
+            end
+            return map
+        else
+            return dataValue
+        end
+
     else
         return dataValue
     end
@@ -198,6 +237,17 @@ local function printTableStructure(tbl, indent)
     indent = indent or ""
 
     if tbl == nil then return end
+
+    -- Top-level scalar / UObject results (e.g. Map element via Icons[Key]) are not tables
+    if type(tbl) ~= "table" then
+        if type(tbl) == "userdata" then
+            print(string.format("%s%s (Userdata/UObject Instance)", indent, tostring(tbl)))
+        else
+            print(string.format("%s%s (%s)", indent, tostring(tbl), type(tbl)))
+        end
+        return
+    end
+
     for key, val in pairs(tbl) do
         local valType = type(val)
 
@@ -325,6 +375,36 @@ function M.getProperty(callerObject, propertyName)
     return result
 end
 
+-- Sets a property (or map/array element via param_name indexing). Returns nothing.
+-- Failures are printed from on_lua_event when the response contains an error field.
+function M.setProperty(callerObject, propertyName, value)
+    local valueParams = {value}
+    convertInputParams(valueParams)
+
+	local data =
+	{
+		debug = M.showDebug,
+		caller_object = callerObject:get_address(),
+		param_name = propertyName,
+		value = valueParams[1],
+	}
+    if M.showDebug then print("SetProperty dispatching for property:\n", propertyName, json.dump_string(data)) end
+	local callID = "SetProperty_" .. guid()
+
+    AsyncRegistry[callID] = {
+        completed = false,
+        finalResult = nil,
+        registeredCallback = nil,
+        delayedCleanup = false
+    }
+    if M.showDebug then print("AsyncRegistry entry created", callID) end
+
+	uevr.api:dispatch_custom_event(callID, json.dump_string(data))
+
+    -- Void: errors already printed in on_lua_event; success has no caller payload
+    AsyncRegistry[callID] = nil
+end
+
 uevr.sdk.callbacks.on_lua_event(function(eventName, eventData)
     if M.showDebug then print("on_lua_event", eventName, eventData) end
     local id = eventName
@@ -334,10 +414,21 @@ uevr.sdk.callbacks.on_lua_event(function(eventName, eventData)
     if not task then return end
 
     if M.showDebug then print("--------- on_lua_event raw return value -------------:\n", eventData) end
-    local result = M.convertResultData(json.load_string(eventData))
-    if M.showDebug then
-        print("--------- on_lua_event Converted structure -------------")
-        printTableStructure(result)
+
+    local parsed = json.load_string(eventData)
+    local result = nil
+    if type(parsed) == "table" and parsed.error ~= nil then
+        print("[plugin] error (" .. tostring(id) .. "):", parsed.error, "Enable debug for more information")
+    elseif type(parsed) == "table" and parsed.success == true then
+        if M.showDebug then
+            print("--------- on_lua_event success -------------")
+        end
+    else
+        result = M.convertResultData(parsed)
+        if M.showDebug then
+            print("--------- on_lua_event Converted structure -------------")
+            printTableStructure(result)
+        end
     end
 
     task.completed = true

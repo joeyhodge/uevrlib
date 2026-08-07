@@ -1,4 +1,259 @@
+-- Aiming and Direction control for Unreal Engine VR mods 
 -- Decoupled Yaw code courtesy of Pande4360
+
+--[[
+Usage
+	Drop the lib folder containing this file into your project folder
+	To use input/body rotation for a game, add code like this in your script:
+		local uevrUtils = require('libs/uevr_utils')
+		local input = require('libs/input')
+		input.init()
+	In developer mode, input.init(true) also loads the in-game input configuration tool.
+	Parameters are stored in input_parameters.json (profiles supported).
+
+	This module drives decoupled-yaw body facing, pawn roomscale follow, aim-method
+	control rotation, snap/smooth turn, VR camera root offsets, body-mesh relative
+	placement, and spatial-audio listener attachment. Designed to work with UEVR
+	decoupled pitch enabled (set automatically on load).
+
+	Enums (from libs/enums/input):
+		input.AimMethod - UEVR, HEAD, RIGHT_CONTROLLER, LEFT_CONTROLLER, RIGHT_WEAPON, LEFT_WEAPON
+		input.PawnRotationMode - NONE, RIGHT_CONTROLLER, LEFT_CONTROLLER, LOCKED, SIMPLE, ADVANCED
+		input.PawnPositionMode - NONE, FOLLOWS, ANIMATED
+
+	Available functions:
+
+	input.init((optional)isDeveloperMode, (optional)logLevel) - initializes the input module.
+		Loads parameters. If isDeveloperMode is omitted, uses uevrUtils.getDeveloperMode().
+		In developer mode the input_config_dev UI is loaded for live parameter editing.
+		example:
+			input.init()
+			input.init(true, LogLevel.Debug)
+
+	input.setLogLevel(val) - sets the logging level for input system messages
+		example:
+			input.setLogLevel(LogLevel.Debug)
+
+	input.print(text, (optional)logLevel) - prints a message at the given (or Error) log level
+		example:
+			input.print("Hello", LogLevel.Debug)
+
+	input.setDisabled(val) - overrides enable/disable for the whole input body/aim system.
+		When disabled (true), clears decoupledYaw/bodyRotationOffset so re-enable re-inits facing.
+		example:
+			input.setDisabled(true)
+
+	input.isDisabled() - returns true if the override or internal disabled flag is set
+		example:
+			if input.isDisabled() then return end
+
+	input.registerIsDisabledCallback(func) - registers a priority boolean callback for
+		"is_input_disabled". Return true to force input disabled for that frame.
+		example:
+			input.registerIsDisabledCallback(function()
+				return status.inCinematic == true
+			end)
+
+	input.reset() - resets runtime state (yaw, meshes, camera, pawn settings) without wiping params
+		example:
+			input.reset()
+
+	input.resetView() - clears decoupledYaw / bodyRotationOffset / timing (used on recenter)
+		example:
+			input.resetView()
+
+	input.resetCapsuleComponent() - resets yaw state and zeroes RootComponent / actor rotation
+		example:
+			input.resetCapsuleComponent()
+
+	input.setAimMethod(val) - persists aim method (input.AimMethod.*)
+		example:
+			input.setAimMethod(input.AimMethod.RIGHT_CONTROLLER)
+
+	input.setOverrideAimMethod(val) - temporary aim-method override (nil clears to saved param)
+		example:
+			input.setOverrideAimMethod(input.AimMethod.HEAD)
+			input.setOverrideAimMethod(nil)
+
+	input.setAimCameraOverride(val) - temporary aim-camera descriptor override
+		example:
+			input.setAimCameraOverride("Pawn.Camera")
+
+	input.setAimRotationOffset(offset) - sets runtime aim rotation offset (rotator-like table)
+		example:
+			input.setAimRotationOffset(uevrUtils.rotator(0, 5, 0))
+
+	input.getAimRotationOffset() - returns the current aim rotation offset
+		example:
+			local offset = input.getAimRotationOffset()
+
+	input.getAimOffsetAdjustedRotation(rotation) - returns rotation composed with aimRotationOffset
+		(also used for gunstock adjustments when aim method is a controller)
+		example:
+			local adjusted = input.getAimOffsetAdjustedRotation(controllers.getControllerRotation(1))
+
+	input.setWeaponRotation(leftRotation, rightRotation) - sets weapon aim rotators for
+		LEFT_WEAPON / RIGHT_WEAPON aim methods (usually from attachment grip callbacks)
+		example:
+			input.setWeaponRotation(leftRot, rightRot)
+
+	input.setPawnRotationMode(val) - persists body yaw mode (input.PawnRotationMode.*)
+		example:
+			input.setPawnRotationMode(input.PawnRotationMode.LOCKED)
+
+	input.getPawnRotationMode() - returns the saved pawnRotationMode param (ignores overrides)
+		example:
+			local mode = input.getPawnRotationMode()
+
+	input.getEffectivePawnRotationMode() - returns override if set, else saved pawnRotationMode.
+		Use this when reacting to live body-yaw behavior. ik.lua uses this
+		example:
+			local mode = input.getEffectivePawnRotationMode()
+
+	input.setOverridePawnRotationMode(val) - temporary body yaw mode override (nil clears).
+		Does not change the saved profile value.
+		example:
+			input.setOverridePawnRotationMode(input.PawnRotationMode.RIGHT_CONTROLLER)
+			input.setOverridePawnRotationMode(nil)
+
+	input.setForcedBodyYaw(worldYawOrNil) - hold RootComponent to absolute world yaw
+		(degrees). Nil releases. Does not change setRotationModeRotationDisabled or camera offsets.
+		example:
+			input.setForcedBodyYaw(root:K2_GetComponentRotation().Yaw)
+			input.setForcedBodyYaw(nil)
+
+	input.getForcedBodyYaw() - returns the current forced world yaw, or nil
+		example:
+			local yaw = input.getForcedBodyYaw()
+
+	input.setBodyYawWritesSuppressed(val) - when true, stops writing RootComponent yaw
+		so the game can own orientation; syncs bodyRotationOffset from root and mirrors large /
+		any meaningful root yaw deltas into decoupledYaw (e.g. ladder top-mount 180°) so the VR
+		view stays facing with the pawn. Does not change setRotationModeRotationDisabled.
+		example:
+			input.setBodyYawWritesSuppressed(true)
+			input.setBodyYawWritesSuppressed(false)
+
+	input.getBodyYawWritesSuppressed() - returns whether body yaw root writes are suppressed
+		example:
+			if input.getBodyYawWritesSuppressed() then ... end
+
+	input.setRotationModeRotationDisabled(val) - when true, skips applying VR camera rotation
+		offsets and snap-turn root writes for pawn rotation mode (parameter
+		pawnRotationModeDisableRotation also gates this)
+		example:
+			input.setRotationModeRotationDisabled(true)
+
+	input.setPlayerControllerRotationFollowsBody(followsBody) - when true (default, legacy),
+		ControlRotation follows body yaw (decoupledYaw + bodyRotationOffset); when false,
+		ControlRotation follows the current aim method (needed for e.g. Atomic Heart pickups)
+		example:
+			input.setPlayerControllerRotationFollowsBody(false)
+
+	input.getRotationOffset() - returns decoupledYaw + bodyRotationOffset (0 if unavailable)
+		example:
+			local yaw = input.getRotationOffset()
+
+	input.setPawnPositionMode(val) - persists roomscale follow mode (input.PawnPositionMode.*)
+		example:
+			input.setPawnPositionMode(input.PawnPositionMode.FOLLOWS)
+
+	input.setPawnPositionAnimationScale(val) - movement-input scale when position mode is ANIMATED
+		example:
+			input.setPawnPositionAnimationScale(0.2)
+
+	input.setPawnPositionSweepMovement(val) - whether FOLLOWS uses sweep on K2_AddWorldOffset
+		example:
+			input.setPawnPositionSweepMovement(true)
+
+	input.setUseSnapTurn(val) - enables snap turn (else smooth turn)
+		example:
+			input.setUseSnapTurn(true)
+
+	input.setSnapAngle(val) - snap turn angle in degrees
+		example:
+			input.setSnapAngle(45)
+
+	input.setSmoothTurnSpeed(val) - smooth turn rate parameter
+		example:
+			input.setSmoothTurnSpeed(50)
+
+	input.setOptimizeBodyYawCalculations(val) - when true (default), body yaw stereo updates
+		prefer a single eye; set false if eyes desync or IK jitters on snap/fast head turns
+		example:
+			input.setOptimizeBodyYawCalculations(false)
+
+	input.setHeadOffset(val) - persists headOffset vector (mesh relative XY / camera Z usage)
+		example:
+			input.setHeadOffset({X=0, Y=0, Z=0})
+
+	input.getHeadOffset() - returns configured headOffset, or zero vector if input is disabled
+		example:
+			local offset = input.getHeadOffset()
+
+	input.setRootOffset(val) - persists rootOffset for VR camera position alignment
+		example:
+			input.setRootOffset({X=0, Y=0, Z=0})
+
+	input.setAdjustForAnimation(val) - enables neck/mesh correction from head/root bones during anim
+		example:
+			input.setAdjustForAnimation(true)
+
+	input.setAdjustForEyeOffset(val) - enables eye-bone based mesh offset correction
+		example:
+			input.setAdjustForEyeOffset(true)
+
+	input.setEyeOffset(val) - persists eyeOffset numeric param
+		example:
+			input.setEyeOffset(0)
+
+	input.setFixSpatialAudio(val) - enables/disables audio listener override on the HMD controller
+		example:
+			input.setFixSpatialAudio(true)
+
+	input.setBodyMeshOverride(meshList) - overrides the body mesh list used for relative placement
+		(pass a table of meshes; nil falls back to pawnModule.getBodyMesh())
+		example:
+			input.setBodyMeshOverride({ myMesh })
+
+	input.isBodyMeshPositionAdjustmentAllowed() - returns whether adjustBodyMeshPosition is enabled
+		example:
+			if input.isBodyMeshPositionAdjustmentAllowed() then ... end
+
+	input.setMeshRelativePositionDisabled(val) - when true, stops updating body mesh RelativeLocation
+		and immediately clears XY offsets
+		example:
+			input.setMeshRelativePositionDisabled(true)
+
+	input.updateMeshRelativePosition((optional)setDisabled) - manually updates (or clears if
+		setDisabled) body mesh RelativeLocation from head/anim/eye offsets
+		example:
+			input.updateMeshRelativePosition()
+			input.updateMeshRelativePosition(true)
+
+	input.preventPawnSettingsResetOnDisable(val) - when true, disabling input does not restore
+		cached pawn bUseControllerRotation* / CharacterMovement orient flags
+		example:
+			input.preventPawnSettingsResetOnDisable(true)
+
+	input.setCurrentProfile(profileID) - sets the active input parameter profile by id and resets runtime
+		example:
+			input.setCurrentProfile("055655c3-5c27-40fb-afa2-af6169aa5397")
+
+	input.setCurrentProfileByLabel(profileLabel) - sets the active profile by display label
+		example:
+			input.setCurrentProfileByLabel("Default")
+
+	input.getConfigurationWidgets((optional)options) - returns config UI widgets from input_config
+		(non-dev overlay integration). Initializes the config module on first call.
+		example:
+			local widgets = input.getConfigurationWidgets()
+
+	input.showConfiguration(saveFileName, (optional)options) - shows the input configuration UI
+		example:
+			input.showConfiguration("my_input_config")
+
+--]]
 
 local uevrUtils = require("libs/uevr_utils")
 local mathLib = require("libs/core/math_lib")
@@ -49,7 +304,8 @@ local parameters = {
 	pawnRotationModeDisableRotation = false,
 	pawnRotationModeDisableInEarlyUpdate = false,
 	usePawnControlRotation = 1,
-	cameraResetAction = 1
+	cameraResetAction = 1,
+	adjustBodyMeshPosition = true,
 }
 
 local isDisabled = false
@@ -60,6 +316,15 @@ local decoupledYaw = nil
 local bodyRotationOffset = 0
 local bodyMesh = nil
 local pawnRotationModeOverride = nil
+-- Optional absolute world-yaw hold. When set, updateBodyYaw writes this yaw and skips
+-- mode tracking. Nil (default) leaves all games unchanged.
+local forcedBodyYaw = nil
+-- When true, updateBodyYaw does not write RootComponent (still syncs bodyRotationOffset
+-- from current root). Opt-in; Nil/false default leaves all games unchanged.
+local bodyYawWritesSuppressed = false
+-- Last body-facing yaw before/during suppress; used to carry game snap-turns into
+-- decoupledYaw so the VR view stays aligned with the pawn (e.g. ladder top mount).
+local lastSuppressedBodyYaw = nil
 local aimMethodOverride = nil
 local aimCameraOverride = nil
 local lastBodyYawUpdateTime = nil
@@ -157,6 +422,10 @@ end
 
 function M.setBodyMeshOverride(meshList)
 	bodyMeshOverride = meshList
+end
+
+function M.isBodyMeshPositionAdjustmentAllowed()
+	return uevrUtils.ternary(getParameter("adjustBodyMeshPosition") == nil, true, getParameter("adjustBodyMeshPosition"))
 end
 
 local function getAimMethod()
@@ -720,6 +989,11 @@ local function saveParameter(key, value, persist, noCallbacks)
 	if key == "useMeshHeightForHeadOffset" then
 		status["meshZOffset"] = nil
 	end
+	if key == "adjustBodyMeshPosition" then
+		if value == false then
+			M.updateMeshRelativePosition(true)
+		end
+	end
 end
 
 local createConfigMonitor = doOnce(function()
@@ -845,8 +1119,42 @@ function M.getPawnRotationMode()
 	return getParameter("pawnRotationMode")
 end
 
+-- Includes setOverridePawnRotationMode; use this when reacting to live body yaw behavior.
+function M.getEffectivePawnRotationMode()
+	return pawnRotationModeOverride ~= nil and pawnRotationModeOverride or getParameter("pawnRotationMode")
+end
+
 function M.setOverridePawnRotationMode(val)
 	pawnRotationModeOverride = val
+end
+
+-- Hold pawn root to an absolute world yaw (degrees), or nil to release.
+-- Opt-in only: does not alter setRotationModeRotationDisabled or camera-offset behavior.
+function M.setForcedBodyYaw(worldYawOrNil)
+	forcedBodyYaw = worldYawOrNil
+end
+
+function M.getForcedBodyYaw()
+	return forcedBodyYaw
+end
+
+-- When true, skip RootComponent yaw writes so the game (or caller) can own orientation.
+-- Still syncs bodyRotationOffset from the current root. Large game-driven yaw snaps
+-- (e.g. 180° ladder top mount) are mirrored into decoupledYaw so the VR view faces
+-- with the pawn. Does not change camera-offset or setRotationModeRotationDisabled.
+function M.setBodyYawWritesSuppressed(val)
+	local enable = val and true or false
+	if enable and not bodyYawWritesSuppressed and decoupledYaw ~= nil then
+		-- Seed from the yaw we last owned so the next game snap is detectable.
+		lastSuppressedBodyYaw = uevrUtils.clampAngle180(decoupledYaw + bodyRotationOffset)
+	elseif not enable then
+		lastSuppressedBodyYaw = nil
+	end
+	bodyYawWritesSuppressed = enable
+end
+
+function M.getBodyYawWritesSuppressed()
+	return bodyYawWritesSuppressed
 end
 
 function M.setAimCameraOverride(val)
@@ -1075,6 +1383,39 @@ local lateYaw = false
 --this is called from both on_pre_engine_tick and on_early_calculate_stereo_view_offset but K2_SetWorldRotation can only be called once per tick
 --because of the currentOffset ~= bodyRotationOffset check
 local function updateBodyYaw(delta)
+	if forcedBodyYaw ~= nil and decoupledYaw ~= nil and rootComponent ~= nil then
+		bodyRotationOffset = uevrUtils.clampAngle180(forcedBodyYaw - decoupledYaw)
+		pcall(function()
+			if rootComponent.K2_SetWorldRotation ~= nil then
+				rootComponent:K2_SetWorldRotation(uevrUtils.rotator(0, forcedBodyYaw, 0), false, reusable_hit_result, false)
+			end
+		end)
+		return
+	end
+
+	if bodyYawWritesSuppressed and decoupledYaw ~= nil and rootComponent ~= nil then
+		-- Let the game own RootComponent yaw. Mirror every root yaw change into
+		-- decoupledYaw so the VR view stays facing with the pawn (ladder mounts,
+		-- including gradual/animated 180° top-mount turns).
+		pcall(function()
+			if rootComponent.K2_GetComponentRotation ~= nil then
+				local rootRot = rootComponent:K2_GetComponentRotation()
+				if rootRot ~= nil then
+					local rootYaw = rootRot.Yaw
+					if lastSuppressedBodyYaw ~= nil then
+						local yawDelta = uevrUtils.clampAngle180(rootYaw - lastSuppressedBodyYaw)
+						if math.abs(yawDelta) > 1.0 then
+							decoupledYaw = uevrUtils.clampAngle180(decoupledYaw + yawDelta)
+						end
+					end
+					lastSuppressedBodyYaw = rootYaw
+					bodyRotationOffset = uevrUtils.clampAngle180(rootYaw - decoupledYaw)
+				end
+			end
+		end)
+		return
+	end
+
 	local pawnRotationMode = getPawnRotationMode() -- getParameter("pawnRotationMode")
 	if pawnRotationMode ~= M.PawnRotationMode.NONE then
 		if decoupledYaw~= nil and rootComponent ~= nil then
@@ -1381,17 +1722,20 @@ local function getVRCameraOffsets()
 end
 getVRCameraOffsets = uevrUtils.profiler:wrap("getVRCameraOffsets", getVRCameraOffsets)
 
+--native stereo uses view_index 1 and 2
+--AFW uses only 1
 uevr.params.sdk.callbacks.on_early_calculate_stereo_view_offset(function(device, view_index, world_to_meters, position, rotation, is_double)
 	if not isDisabled then --and getParameter("aimMethod") ~= M.AimMethod.UEVR then
 		--print(optimizeBodyYawCalculations == false, getParameter("optimizeBodyRotationCalculations") ~= true, view_index)
-		if isRotationModeEarlyUpdateDisabled() == false and lateYaw == false and (optimizeBodyYawCalculations == false or getParameter("optimizeBodyRotationCalculations") ~= true or view_index == 0) then
+		if isRotationModeEarlyUpdateDisabled() == false and lateYaw == false and (optimizeBodyYawCalculations == false or getParameter("optimizeBodyRotationCalculations") ~= true or view_index == 1) then
 			updateBodyYaw()
 		end
-		if getParameter("optimizeBodyLocationCalculations") ~= true or view_index == 0 then
+		--print(view_index)
+		if getParameter("optimizeBodyLocationCalculations") ~= true or view_index == 1 then
 			updatePawnPositionRoomscale(world_to_meters)
 		end
 
-		if lateYaw == false and view_index == 0 then
+		if lateYaw == false and view_index == 1 and M.isBodyMeshPositionAdjustmentAllowed() then
 			updateMeshRelativePosition()
 		end
 
@@ -1532,6 +1876,9 @@ local function reset()
 	decoupledYaw = nil
 	bodyRotationOffset = 0
 	lastBodyYawUpdateTime = nil
+	forcedBodyYaw = nil
+	bodyYawWritesSuppressed = false
+	lastSuppressedBodyYaw = nil
 	bodyMesh = nil
 	--localPawn = nil
 	cameraComponent:reset()

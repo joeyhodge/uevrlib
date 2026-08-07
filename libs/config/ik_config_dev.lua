@@ -32,6 +32,7 @@ local rigDefaults = {
 	animation_mesh = "",
 	animation_location_offset = uevrUtils.vector(0,0,0),
 	animation_rotation_offset = uevrUtils.rotator(0,0,0),
+	animation_ik_pose_authoritative = false,
 	show_debug_meshes = false,
 	parent_type = M.ParentType.PAWN_ROOT,
 	hide_body = false,
@@ -56,7 +57,7 @@ local solverDefaults = {
     max_stretch_scale = 0.0,
     wrist_bone = "",
     twist_bones = {},
-    --invert_forearm_roll = false,
+	incremental_forearm_twist = false,
 	sort_order = 0,
 	smoothing = 0,
     wrist_twist_influence = 0.35,
@@ -243,6 +244,12 @@ local function getConfigWidgets(m_paramManager)
                     range = {-360, 360},
                     initialValue = {0,0,0}
                 },
+                {
+                    widgetType = "checkbox",
+                    id = widgetPrefix .. "animation_ik_pose_authoritative",
+                    label = "IK Pose Authoritative",
+                    initialValue = false
+                },
             { widgetType = "tree_pop" },
         	{ widgetType = "begin_group", id =  widgetPrefix .. "solvers_group", isHidden = false },
 				{
@@ -418,12 +425,6 @@ local function getConfigWidgets(m_paramManager)
 							range = {0, 1},
 							initialValue = 0.0
 						},
-						-- {
-						-- 	widgetType = "checkbox",
-						-- 	id = widgetPrefix .. "invert_forearm_roll",
-						-- 	label = "Invert Forearm Roll",
-						-- 	initialValue = false
-						-- },
 						{
 							widgetType = "checkbox",
 							id = widgetPrefix .. "allow_wrist_affects_elbow",
@@ -621,6 +622,12 @@ local function getConfigWidgets(m_paramManager)
 							initialValue = 0.0,
 							width = 80
 						},
+						{
+							widgetType = "checkbox",
+							id = widgetPrefix .. "incremental_forearm_twist",
+							label = "Use Pitch-Stable Forearm Twist",
+							initialValue = false
+						},
 					{ widgetType = "end_group" },
 				{
 					widgetType = "tree_pop"
@@ -798,7 +805,7 @@ local function updateSetting(key, value)
 	local profileId = getActiveProfileId()
 	if profileId == nil then return end
 
-	if key == "mesh" or key == "animation_mesh" or key == "animation_location_offset" or key == "animation_rotation_offset" or key == "mesh_location_offset" or key == "mesh_rotation_offset" or key == "show_debug_meshes" or key == "parent_type"  or key == "hide_body" or key == "spine_bone_name" or key == "left_shoulder_bone_name" or key == "right_shoulder_bone_name" or key == "shoulder_width_scale" then
+	if key == "mesh" or key == "animation_mesh" or key == "animation_location_offset" or key == "animation_rotation_offset" or key == "mesh_location_offset" or key == "mesh_rotation_offset" or key == "show_debug_meshes" or key == "parent_type"  or key == "hide_body" or key == "spine_bone_name" or key == "left_shoulder_bone_name" or key == "right_shoulder_bone_name" or key == "shoulder_width_scale" or key == "animation_ik_pose_authoritative" then
 		pmSet({profileId, key}, value, true)
 		uevrUtils.executeUEVRCallbacks("on_ik_config_param_change", key, value, true)
 		return
